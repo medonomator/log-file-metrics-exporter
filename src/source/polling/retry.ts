@@ -16,18 +16,33 @@ export interface RetryOutcome<T> {
   readonly attempts: number;
 }
 
+export interface RetryAttemptInfo {
+  readonly attempt: number;
+  readonly maxAttempts: number;
+  readonly delayMs: number;
+  readonly error: ClassifiedError;
+}
+
+export interface WithRetryHooks {
+  readonly sleep?: (ms: number) => Promise<void>;
+  readonly onRetry?: (info: RetryAttemptInfo) => void;
+}
+
 /**
  * Run `op` with exponential backoff. Re-throws the last classified error after
  * the final attempt, or earlier if the error is non-retryable (auth, 404, ...).
  *
- * `sleep` is injectable for deterministic tests.
+ * `hooks.sleep` is injectable for deterministic tests. `hooks.onRetry` fires
+ * before each scheduled retry so callers can wire structured logging,
+ * metrics, or tracing without coupling the helper to a specific logger.
  */
 export async function withRetry<T>(
   op: () => Promise<T>,
   config: RetryConfig | undefined = undefined,
-  sleep: (ms: number) => Promise<void> = defaultSleep,
+  hooks: WithRetryHooks = {},
 ): Promise<RetryOutcome<T>> {
   const cfg = mergeRetry(config);
+  const sleep = hooks.sleep ?? defaultSleep;
 
   let lastError: ClassifiedError | null = null;
   for (let attempt = 1; attempt <= cfg.maxAttempts; attempt += 1) {
@@ -40,8 +55,14 @@ export async function withRetry<T>(
       if (!classified.retryable || attempt === cfg.maxAttempts) {
         throw classified;
       }
-      const delay = backoffDelay(attempt, cfg);
-      await sleep(delay);
+      const delayMs = backoffDelay(attempt, cfg);
+      hooks.onRetry?.({
+        attempt,
+        maxAttempts: cfg.maxAttempts,
+        delayMs,
+        error: classified,
+      });
+      await sleep(delayMs);
     }
   }
 
