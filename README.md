@@ -20,7 +20,12 @@ Sources poll an external system (HTTP endpoint, file, database) and emit `Polled
 ### Quick start
 
 ```ts
-import { createPollingSource, withRetry, InMemoryStateStore } from './source/polling';
+import {
+  createPollingSource,
+  withRetry,
+  InMemoryStateStore,
+  PollingError,
+} from './source/polling';
 
 const source = createPollingSource('app-log-1', {
   kind: 'file',
@@ -30,24 +35,58 @@ const source = createPollingSource('app-log-1', {
 });
 const store = new InMemoryStateStore();
 
-const prev = await store.load(source.id);
-const { value } = await withRetry(() => source.pollOnce(prev), { maxAttempts: 3, baseDelayMs: 200 });
-await store.save(source.id, value.nextState);
-console.log(value.records);
+try {
+  const prev = await store.load(source.id);
+  const { value } = await withRetry(
+    () => source.pollOnce(prev),
+    { maxAttempts: 3, baseDelayMs: 200 },
+  );
+  await store.save(source.id, value.nextState);
+  console.log(value.records);
+} catch (err) {
+  if (err instanceof PollingError) {
+    if (err.kind === 'not_found') {
+      // permanent: the file or endpoint does not exist; stop polling this source
+    } else if (err.kind === 'auth') {
+      // permanent: rotate credentials before retrying
+    } else {
+      // network / server failures already exhausted retry budget; alert and back off
+    }
+  }
+  throw err;
+}
 ```
 
 ### Configuration
 
-| Field            | Type                                | Required | Notes                                                            |
-| ---------------- | ----------------------------------- | -------- | ---------------------------------------------------------------- |
-| `kind`           | `'http' \| 'file' \| 'database'`    | yes      | Selects the implementation.                                      |
-| `intervalMs`     | `number`                            | yes      | Polling cadence used by the orchestrator (the source itself does not sleep). |
-| `retry`          | `RetryConfig`                       | no       | Used with `withRetry()`. See below.                              |
-| HTTP `url`       | `string`                            | yes      | Endpoint to GET.                                                 |
-| HTTP `headers`   | `Record<string, string>`            | no       | Merged with auto-added `If-None-Match` when an etag is cached.   |
-| HTTP `timeoutMs` | `number`                            | no       | Default 10000.                                                   |
-| File `path`      | `string`                            | yes      | Reads bytes after the last persisted offset.                     |
-| Database `connectionString` / `query` | `string`               | yes      | Contract only. Bring your own driver.                            |
+All sources share the base fields. Each `kind` adds its own:
+
+| Field          | Type                              | Required | Notes                                                                        |
+| -------------- | --------------------------------- | -------- | ---------------------------------------------------------------------------- |
+| `kind`         | `'http' \| 'file' \| 'database'`  | yes      | Selects the implementation.                                                  |
+| `intervalMs`   | `number`                          | yes      | Polling cadence used by the orchestrator. The source itself does not sleep. |
+| `retry`        | `RetryConfig`                     | no       | Passed to `withRetry()`. See below.                                          |
+
+HTTP-specific (`kind: 'http'`):
+
+| Field       | Type                       | Required | Notes                                                              |
+| ----------- | -------------------------- | -------- | ------------------------------------------------------------------ |
+| `url`       | `string`                   | yes      | Endpoint to GET.                                                   |
+| `headers`   | `Record<string, string>`   | no       | Merged with auto-added `If-None-Match` when an etag is cached.     |
+| `timeoutMs` | `number`                   | no       | Default 10000.                                                     |
+
+File-specific (`kind: 'file'`):
+
+| Field  | Type     | Required | Notes                                                |
+| ------ | -------- | -------- | ---------------------------------------------------- |
+| `path` | `string` | yes      | Reads bytes after the last persisted offset.         |
+
+Database-specific (`kind: 'database'`):
+
+| Field              | Type     | Required | Notes                                          |
+| ------------------ | -------- | -------- | ---------------------------------------------- |
+| `connectionString` | `string` | yes      | Contract only. Bring your own driver.          |
+| `query`            | `string` | yes      | Same: implementations decide how to parameterize. |
 
 ### Retry
 
@@ -60,7 +99,17 @@ console.log(value.records);
 | `maxDelayMs`  | `10000` | Cap.                                                   |
 | `jitter`      | `true`  | Multiplies delay by a random `[0.5, 1.0]` factor.      |
 
-Errors are classified into `network`, `not_found`, `auth`, `server`, `unknown`. Only `network` and `server` are retryable. `not_found` and `auth` short-circuit immediately.
+Errors are classified into one of:
+
+| `kind`        | Triggered by                                               | Retryable |
+| ------------- | ---------------------------------------------------------- | --------- |
+| `network`     | `ECONNREFUSED`, `ETIMEDOUT`, `ENOTFOUND` (DNS / TCP fail)  | yes       |
+| `server`      | HTTP 5xx response                                          | yes       |
+| `not_found`   | HTTP 404, file `ENOENT`                                    | no        |
+| `auth`        | HTTP 401 / 403                                             | no        |
+| `unknown`     | Anything else (parse failures, unexpected throws)          | no        |
+
+Only `network` and `server` are retried. `not_found` and `auth` short-circuit immediately so you do not hammer a misconfigured endpoint.
 
 ### State management
 
@@ -69,6 +118,8 @@ Every poll returns a `nextState` ( `lastTimestamp` / `lastOffset` / `lastEtag`).
 ### Extending
 
 `createPollingSource` covers `http` and `file`. For `database` (or any other transport): write a class that implements `PollingSource` (`id` + `pollOnce(prev)`) and pass it where the orchestrator expects the interface. The retry helper, error classifier, and state store are reusable as-is.
+
+When you add a custom source, **wire it into a `StateStore` immediately** (in-memory for tests, Redis or filesystem for prod). Without persistence, every restart re-reads from the beginning, which double-counts metrics and may overwhelm your downstream sink. The store is small (`load(id)` / `save(id, state)`) — implement it before going live.
 
 ### Tests
 
