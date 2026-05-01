@@ -55,4 +55,34 @@ describe('FilePollingSource', () => {
       retryable: false,
     });
   });
+
+  it('detects truncation and reads from offset 0', async () => {
+    await writeFile(logFile, 'a-very-long-first-line\n');
+    const source = new FilePollingSource('f4', {
+      kind: 'file',
+      intervalMs: 1000,
+      path: logFile,
+    });
+    const first = await source.pollOnce(null);
+    expect(first.records.map((r) => r.body)).toEqual(['a-very-long-first-line']);
+
+    await writeFile(logFile, 'short\n');
+    const second = await source.pollOnce(first.nextState);
+    expect(second.records.map((r) => r.body)).toEqual(['short']);
+  });
+
+  it('detects inode change vs prior state and reads from offset 0', async () => {
+    await writeFile(logFile, 'whole-file-after-rotation\n');
+    const source = new FilePollingSource('f5', {
+      kind: 'file',
+      intervalMs: 1000,
+      path: logFile,
+    });
+    const fakePriorState = { lastOffset: 5, lastInode: -1 };
+    const result = await source.pollOnce(fakePriorState);
+    expect(result.records.map((r) => r.body)).toEqual([
+      'whole-file-after-rotation',
+    ]);
+    expect(result.nextState.lastInode).not.toBe(-1);
+  });
 });

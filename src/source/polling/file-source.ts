@@ -19,9 +19,11 @@ export class FilePollingSource implements PollingSource {
 
   async pollOnce(prev: PollingState | null): Promise<PollResult> {
     let size: number;
+    let inode: number;
     try {
       const info = await stat(this.config.path);
       size = info.size;
+      inode = info.ino;
     } catch (err) {
       const code = readErrorCode(err);
       if (code === 'ENOENT') {
@@ -34,9 +36,16 @@ export class FilePollingSource implements PollingSource {
       throw classifyError(err);
     }
 
-    const startOffset = Math.min(prev?.lastOffset ?? 0, size);
+    const rotated = prev?.lastInode != null && prev.lastInode !== inode;
+    const truncated = prev?.lastOffset != null && size < prev.lastOffset;
+    const resumeFromZero = rotated || truncated;
+    const startOffset = resumeFromZero ? 0 : Math.min(prev?.lastOffset ?? 0, size);
+
     if (startOffset >= size) {
-      return { records: [], nextState: prev ?? { lastOffset: size } };
+      return {
+        records: [],
+        nextState: { ...(prev ?? {}), lastOffset: size, lastInode: inode },
+      };
     }
 
     const handle = await open(this.config.path, 'r');
@@ -48,7 +57,11 @@ export class FilePollingSource implements PollingSource {
       const records = splitLines(text, startOffset);
       return {
         records,
-        nextState: { ...(prev ?? {}), lastOffset: size },
+        nextState: {
+          ...(prev ?? {}),
+          lastOffset: size,
+          lastInode: inode,
+        },
       };
     } finally {
       await handle.close();

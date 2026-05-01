@@ -12,11 +12,15 @@ export type SourceKind = 'http' | 'file' | 'database';
 /**
  * Resumable position in the source. At least one field should be set so a
  * restart can pick up where the last run left off without duplicate reads.
+ *
+ * `lastInode` lets file sources detect rotation/truncation and reset the
+ * offset instead of reading garbage or skipping new content.
  */
 export interface PollingState {
   readonly lastTimestamp?: number;
   readonly lastOffset?: number;
   readonly lastEtag?: string;
+  readonly lastInode?: number;
 }
 
 export interface RetryConfig {
