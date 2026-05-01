@@ -29,6 +29,16 @@ One parsed log record handed to a transform.
 | `message`    | `string`                              | yes      | Raw log message body.                            |
 | `attributes` | `Record<string, AttributeValue>`      | no       | Open-ended bag for parser-supplied fields. Extend without changing the core shape. |
 
+#### When to use `attributes`
+
+`attributes` carries everything the parser surfaced beyond the core fields above. Use it for:
+
+- **Numeric fields** the transform may turn into metric values: `duration_ms`, `bytes_sent`, `status_code`.
+- **High-cardinality identifiers** that should NOT become metric dimensions: `request_id`, `trace_id`, `user_id`. Read them in code, but do not copy into `dimensions`.
+- **Parser-specific extras**: regex named groups, JSON fields not part of the core shape.
+
+Keep core fields (`timestamp`, `source`, `level`, `message`) at the top level, and put everything else under `attributes`. New parsers do not need to extend the interface.
+
 ### `SinkTransformOutput`
 
 One metric sample produced by a transform.
