@@ -7,7 +7,13 @@
  * helpers so each source implementation can stay focused on transport.
  */
 
-export type SourceKind = 'http' | 'file' | 'database';
+/**
+ * Built-in source kinds. Anything else (database, message queue, S3, ...) is
+ * an extension point: implement `PollingSource` directly and pass it to the
+ * orchestrator. The factory in `index.ts` only handles the kinds listed here,
+ * so the public API and the implementation stay in lockstep.
+ */
+export type SourceKind = 'http' | 'file';
 
 /**
  * Resumable position in the source. At least one field should be set so a
@@ -48,16 +54,7 @@ export interface FilePollingConfig extends BasePollingConfig {
   readonly path: string;
 }
 
-export interface DatabasePollingConfig extends BasePollingConfig {
-  readonly kind: 'database';
-  readonly connectionString: string;
-  readonly query: string;
-}
-
-export type PollingConfig =
-  | HttpPollingConfig
-  | FilePollingConfig
-  | DatabasePollingConfig;
+export type PollingConfig = HttpPollingConfig | FilePollingConfig;
 
 /**
  * One record produced by a poll. The body is intentionally a string so
@@ -73,7 +70,14 @@ export interface PolledRecord {
 /**
  * Persistence boundary for `PollingState`. Implementations decide where to
  * write (memory, disk, Redis, ...). Default in-memory store ships in
- * `state-store.ts` for tests and ephemeral runs.
+ * `state-store.ts` and is suitable only for tests and single-process runs
+ * without durability needs - production deployments MUST provide a durable
+ * implementation (Redis, Postgres, file with fsync, ...).
+ *
+ * Delivery semantics: the orchestrator emits records first, THEN calls
+ * `save(nextState)`. A crash between those two steps replays the most recent
+ * batch on restart, so the contract is at-least-once. Downstream consumers
+ * must be idempotent or deduplicate (e.g. by `(source, offset)` pair).
  */
 export interface StateStore {
   load(sourceId: string): Promise<PollingState | null>;

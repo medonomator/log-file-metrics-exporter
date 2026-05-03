@@ -30,7 +30,14 @@ export interface WithRetryHooks {
 
 /**
  * Run `op` with exponential backoff. Re-throws the last classified error after
- * the final attempt, or earlier if the error is non-retryable (auth, 404, ...).
+ * the final attempt, or earlier if the error is non-retryable (auth, 404,
+ * unknown, ...).
+ *
+ * Retry policy is owned by `classifyError` / `classifyHttpStatus` in
+ * `errors.ts`. `withRetry` itself only decides *when* to wait, never *what*
+ * is retryable — keeping the policy in one place avoids drift between
+ * sources. In particular, `unknown`-classified failures are treated as
+ * non-retryable on purpose; see `errors.ts` for the rationale.
  *
  * `hooks.sleep` is injectable for deterministic tests. `hooks.onRetry` fires
  * before each scheduled retry so callers can wire structured logging,

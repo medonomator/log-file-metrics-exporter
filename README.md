@@ -15,7 +15,7 @@ Ensure environment variables are set as needed in a .env file.
 
 ## Polling Sources
 
-Sources poll an external system (HTTP endpoint, file, database) and emit `PolledRecord`s. Built-ins live in `src/source/polling/`.
+Sources poll an external system (HTTP endpoint or local file) and emit `PolledRecord`s. Built-ins live in `src/source/polling/`. Other transports (database, message queue, object store, ...) are extension points — implement the `PollingSource` interface directly.
 
 ### Quick start
 
@@ -61,11 +61,11 @@ try {
 
 All sources share the base fields. Each `kind` adds its own:
 
-| Field          | Type                              | Required | Notes                                                                        |
-| -------------- | --------------------------------- | -------- | ---------------------------------------------------------------------------- |
-| `kind`         | `'http' \| 'file' \| 'database'`  | yes      | Selects the implementation.                                                  |
-| `intervalMs`   | `number`                          | yes      | Polling cadence used by the orchestrator. The source itself does not sleep. |
-| `retry`        | `RetryConfig`                     | no       | Passed to `withRetry()`. See below.                                          |
+| Field          | Type                  | Required | Notes                                                                        |
+| -------------- | --------------------- | -------- | ---------------------------------------------------------------------------- |
+| `kind`         | `'http' \| 'file'`    | yes      | Selects the built-in implementation.                                         |
+| `intervalMs`   | `number`              | yes      | Polling cadence used by the orchestrator. The source itself does not sleep. |
+| `retry`        | `RetryConfig`         | no       | Passed to `withRetry()`. See below.                                          |
 
 HTTP-specific (`kind: 'http'`):
 
@@ -77,16 +77,9 @@ HTTP-specific (`kind: 'http'`):
 
 File-specific (`kind: 'file'`):
 
-| Field  | Type     | Required | Notes                                                |
-| ------ | -------- | -------- | ---------------------------------------------------- |
-| `path` | `string` | yes      | Reads bytes after the last persisted offset.         |
-
-Database-specific (`kind: 'database'`):
-
-| Field              | Type     | Required | Notes                                          |
-| ------------------ | -------- | -------- | ---------------------------------------------- |
-| `connectionString` | `string` | yes      | Contract only. Bring your own driver.          |
-| `query`            | `string` | yes      | Same: implementations decide how to parameterize. |
+| Field  | Type     | Required | Notes                                                                                       |
+| ------ | -------- | -------- | ------------------------------------------------------------------------------------------- |
+| `path` | `string` | yes      | Reads bytes after the last persisted offset. Detects rotation (inode change) and truncation (size shrunk below offset) and resumes from byte 0; the small race between rotation and the first `stat()` after it can drop or duplicate the line that straddles the boundary, so callers that need exact-once for that single record must dedupe downstream. |
 
 ### Retry
 
@@ -113,13 +106,15 @@ Only `network` and `server` are retried. `not_found` and `auth` short-circuit im
 
 ### State management
 
-Every poll returns a `nextState` ( `lastTimestamp` / `lastOffset` / `lastEtag`). Persist it via a `StateStore` so a restart resumes without duplication. `InMemoryStateStore` ships for tests and ephemeral runs; production should plug in a Redis or filesystem store implementing the same interface.
+Every poll returns a `nextState` (`lastTimestamp` / `lastOffset` / `lastEtag` / `lastInode`). Persist it via a `StateStore` so a restart resumes near the last known position. `InMemoryStateStore` ships for tests and ephemeral runs; production must plug in a durable store (Redis, Postgres, file with `fsync`, ...) implementing the same interface.
+
+**Delivery semantics — at-least-once.** The orchestrator emits a batch of records first, then calls `store.save(nextState)`. A crash between those two steps replays the most recent batch on the next start, so downstream consumers must be idempotent or deduplicate (e.g. by `(source, offset)` pair for file sources, or by `(source, etag)` for HTTP). This trade favors no-data-loss over no-duplicates; flipping the order would give at-most-once and is intentionally not the default.
 
 ### Extending
 
-`createPollingSource` covers `http` and `file`. For `database` (or any other transport): write a class that implements `PollingSource` (`id` + `pollOnce(prev)`) and pass it where the orchestrator expects the interface. The retry helper, error classifier, and state store are reusable as-is.
+`createPollingSource` covers `http` and `file`. For any other transport (database, message queue, object store, ...): write a class that implements `PollingSource` (`id` + `pollOnce(prev)`) and pass it where the orchestrator expects the interface. The retry helper, error classifier, and state store are reusable as-is.
 
-When you add a custom source, **wire it into a `StateStore` immediately** (in-memory for tests, Redis or filesystem for prod). Without persistence, every restart re-reads from the beginning, which double-counts metrics and may overwhelm your downstream sink. The store is small (`load(id)` / `save(id, state)`) — implement it before going live.
+When you add a custom source, **wire it into a `StateStore` immediately** (in-memory for tests, Redis / Postgres / fsynced file for prod). Without persistence, every restart re-reads from the beginning, which double-counts metrics and may overwhelm your downstream sink. The store is small (`load(id)` / `save(id, state)`) — implement it before going live.
 
 ### Tests
 

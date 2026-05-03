@@ -1,8 +1,12 @@
 import type { PollingState, StateStore } from './types';
 
 /**
- * In-memory state store. Suitable for tests, single-process runs without
- * persistence requirements, or as a base class for richer stores.
+ * In-memory state store. Loses everything on process exit, so it is suitable
+ * only for tests and single-process runs without durability requirements.
+ *
+ * Production deployments MUST provide a durable implementation. See the
+ * `StateStore` interface for delivery-semantics contract (at-least-once:
+ * downstream consumers must dedupe by `(source, offset)` or be idempotent).
  */
 export class InMemoryStateStore implements StateStore {
   private readonly map = new Map<string, PollingState>();

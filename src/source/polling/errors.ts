@@ -1,5 +1,18 @@
 import type { ClassifiedError, ErrorKind } from './types';
 
+/**
+ * Classification policy:
+ *
+ * - `network` (retryable): well-known transient TCP/DNS codes — `ECONNREFUSED`,
+ *   `ETIMEDOUT`, `ENOTFOUND`. These typically clear on their own.
+ * - `unknown` (NON-retryable): everything else, including parse errors,
+ *   programming mistakes, and unexpected throws. Retrying these would burn
+ *   the budget on errors that will not resolve themselves and risks masking
+ *   real bugs. Callers who know an `unknown`-classified failure is in fact
+ *   transient should re-throw a `PollingError` with `retryable: true`.
+ *
+ * HTTP status codes go through `classifyHttpStatus` instead — see there.
+ */
 export function classifyError(err: unknown): ClassifiedError {
   if (err instanceof PollingError) return err;
 

@@ -2,9 +2,9 @@
  * Polling sources public API.
  *
  * `createPollingSource` is the simple factory for built-in `http` and `file`
- * kinds. `database` is part of the contract but not implemented in this
- * package — wire your own driver and pass an instance that satisfies
- * `PollingSource`. The orchestrator only sees the interface.
+ * kinds. Other transports (database, message queue, S3, ...) are extension
+ * points: implement `PollingSource` directly and pass the instance to the
+ * orchestrator. The orchestrator only sees the interface.
  */
 
 import { HttpPollingSource } from './http-source';
@@ -13,7 +13,6 @@ import type { PollingConfig, PollingSource } from './types';
 
 export type {
   ClassifiedError,
-  DatabasePollingConfig,
   ErrorKind,
   FilePollingConfig,
   HttpPollingConfig,
@@ -39,7 +38,10 @@ export function createPollingSource(
 ): PollingSource {
   if (config.kind === 'http') return new HttpPollingSource(id, config);
   if (config.kind === 'file') return new FilePollingSource(id, config);
+  // Exhaustiveness guard — `SourceKind` is a closed union of `http | file`.
+  // If a future kind is added to the type, TypeScript will flag this branch.
+  const _exhaustive: never = config;
   throw new Error(
-    `kind="${config.kind}" is not built in. Provide your own PollingSource implementation.`,
+    `kind="${(_exhaustive as PollingConfig).kind}" is not built in. Provide your own PollingSource implementation.`,
   );
 }

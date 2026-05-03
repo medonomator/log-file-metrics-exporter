@@ -41,6 +41,9 @@ export class FilePollingSource implements PollingSource {
     const resumeFromZero = rotated || truncated;
     const startOffset = resumeFromZero ? 0 : Math.min(prev?.lastOffset ?? 0, size);
 
+    // Empty file (size === 0) and "caught up" (startOffset === size) take the
+    // same fast path: no read, just persist the inode so a future rotation is
+    // still detected.
     if (startOffset >= size) {
       return {
         records: [],
