@@ -13,6 +13,117 @@ This service ingests log data and exports it as metrics for monitoring and analy
 
 Ensure environment variables are set as needed in a .env file.
 
+## Polling Sources
+
+Sources poll an external system (HTTP endpoint or local file) and emit `PolledRecord`s. Built-ins live in `src/source/polling/`. Other transports (database, message queue, object store, ...) are extension points — implement the `PollingSource` interface directly.
+
+### Quick start
+
+```ts
+import {
+  createPollingSource,
+  withRetry,
+  InMemoryStateStore,
+  PollingError,
+} from './source/polling';
+
+const source = createPollingSource('app-log-1', {
+  kind: 'file',
+  intervalMs: 5000,
+  path: '/var/log/app.log',
+  retry: { maxAttempts: 3, baseDelayMs: 200 },
+});
+const store = new InMemoryStateStore();
+
+try {
+  const prev = await store.load(source.id);
+  const { value } = await withRetry(
+    () => source.pollOnce(prev),
+    { maxAttempts: 3, baseDelayMs: 200 },
+  );
+  await store.save(source.id, value.nextState);
+  console.log(value.records);
+} catch (err) {
+  if (err instanceof PollingError) {
+    if (err.kind === 'not_found') {
+      // permanent: the file or endpoint does not exist; stop polling this source
+    } else if (err.kind === 'auth') {
+      // permanent: rotate credentials before retrying
+    } else {
+      // network / server failures already exhausted retry budget; alert and back off
+    }
+  }
+  throw err;
+}
+```
+
+### Configuration
+
+All sources share the base fields. Each `kind` adds its own:
+
+| Field          | Type                  | Required | Notes                                                                        |
+| -------------- | --------------------- | -------- | ---------------------------------------------------------------------------- |
+| `kind`         | `'http' \| 'file'`    | yes      | Selects the built-in implementation.                                         |
+| `intervalMs`   | `number`              | yes      | Polling cadence used by the orchestrator. The source itself does not sleep. |
+| `retry`        | `RetryConfig`         | no       | Passed to `withRetry()`. See below.                                          |
+
+HTTP-specific (`kind: 'http'`):
+
+| Field       | Type                       | Required | Notes                                                              |
+| ----------- | -------------------------- | -------- | ------------------------------------------------------------------ |
+| `url`       | `string`                   | yes      | Endpoint to GET.                                                   |
+| `headers`   | `Record<string, string>`   | no       | Merged with auto-added `If-None-Match` when an etag is cached.     |
+| `timeoutMs` | `number`                   | no       | Default 10000.                                                     |
+
+File-specific (`kind: 'file'`):
+
+| Field  | Type     | Required | Notes                                                                                       |
+| ------ | -------- | -------- | ------------------------------------------------------------------------------------------- |
+| `path` | `string` | yes      | Reads bytes after the last persisted offset. Detects rotation (inode change) and truncation (size shrunk below offset) and resumes from byte 0; the small race between rotation and the first `stat()` after it can drop or duplicate the line that straddles the boundary, so callers that need exact-once for that single record must dedupe downstream. |
+
+### Retry
+
+`RetryConfig` controls `withRetry`:
+
+| Field         | Default | Notes                                                  |
+| ------------- | ------- | ------------------------------------------------------ |
+| `maxAttempts` | `3`     | Total tries (not extra retries).                       |
+| `baseDelayMs` | `200`   | Exponential base.                                      |
+| `maxDelayMs`  | `10000` | Cap.                                                   |
+| `jitter`      | `true`  | Multiplies delay by a random `[0.5, 1.0]` factor.      |
+
+Errors are classified into one of:
+
+| `kind`        | Triggered by                                               | Retryable |
+| ------------- | ---------------------------------------------------------- | --------- |
+| `network`     | `ECONNREFUSED`, `ETIMEDOUT`, `ENOTFOUND` (DNS / TCP fail)  | yes       |
+| `server`      | HTTP 5xx response                                          | yes       |
+| `not_found`   | HTTP 404, file `ENOENT`                                    | no        |
+| `auth`        | HTTP 401 / 403                                             | no        |
+| `unknown`     | Anything else (parse failures, unexpected throws)          | no        |
+
+Only `network` and `server` are retried. `not_found` and `auth` short-circuit immediately so you do not hammer a misconfigured endpoint.
+
+### State management
+
+Every poll returns a `nextState` (`lastTimestamp` / `lastOffset` / `lastEtag` / `lastInode`). Persist it via a `StateStore` so a restart resumes near the last known position. `InMemoryStateStore` ships for tests and ephemeral runs; production must plug in a durable store (Redis, Postgres, file with `fsync`, ...) implementing the same interface.
+
+**Delivery semantics — at-least-once.** The orchestrator emits a batch of records first, then calls `store.save(nextState)`. A crash between those two steps replays the most recent batch on the next start, so downstream consumers must be idempotent or deduplicate (e.g. by `(source, offset)` pair for file sources, or by `(source, etag)` for HTTP). This trade favors no-data-loss over no-duplicates; flipping the order would give at-most-once and is intentionally not the default.
+
+### Extending
+
+`createPollingSource` covers `http` and `file`. For any other transport (database, message queue, object store, ...): write a class that implements `PollingSource` (`id` + `pollOnce(prev)`) and pass it where the orchestrator expects the interface. The retry helper, error classifier, and state store are reusable as-is.
+
+When you add a custom source, **wire it into a `StateStore` immediately** (in-memory for tests, Redis / Postgres / fsynced file for prod). Without persistence, every restart re-reads from the beginning, which double-counts metrics and may overwhelm your downstream sink. The store is small (`load(id)` / `save(id, state)`) — implement it before going live.
+
+### Tests
+
+```sh
+npm test
+```
+
+Vitest covers retry behaviour (success path, retryable failures, non-retryable short-circuit, exhaustion, exponential backoff) plus HTTP and file sources (200, 304, 404, 500, etag round-trip, file resume).
+
 ## Sink Transform Contracts
 
 The sink transform is the boundary between log ingestion and the storage layer. It takes a parsed log record and produces zero or more metric samples ready for downstream emission. Contracts live in `src/sink/transform/`.
@@ -87,3 +198,4 @@ export const logLevelCounter: SinkTransform = (input) => [
   },
 ];
 ```
+
